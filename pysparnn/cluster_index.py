@@ -130,17 +130,12 @@ class ClusterIndex(object):
             root = distance_type(clusters_selection,
                                  list(_np.arange(clusters_selection.shape[0])))
 
-            root.remove_near_duplicates()
-            root = distance_type(root.matrix, 
-                                 list(_np.arange(root.matrix.shape[0])))
-
             rng_step = self.matrix_size
             for rng in range(0, features.shape[0], rng_step):
                 max_rng = min(rng + rng_step, features.shape[0])
                 records_rng = features[rng:max_rng]
-                for i, clstrs in enumerate(root.nearest_search(records_rng)):
-                    _random.shuffle(clstrs)
-                    for _, cluster in _k_best(clstrs, k=1):
+                for i, clstrs in enumerate(root.nearest_search(records_rng, k=1)):
+                    for _, cluster in clstrs:
                         item_to_clusters[cluster].append(i + rng)
 
             clusters = []
@@ -173,7 +168,7 @@ class ClusterIndex(object):
         feature = self.distance_type.features_to_matrix(feature)
         nearest = self
         while not nearest.is_terminal:
-            nearest = nearest.root.nearest_search(feature)
+            nearest = nearest.root.nearest_search(feature, k=1)
             _, nearest = nearest[0][0]
 
         cluster_index = nearest
@@ -232,7 +227,8 @@ class ClusterIndex(object):
                 self.desired_matrix_size, self.parent)
 
 
-    def _search(self, features, k=1, k_clusters=1):
+    def _search(self, features, k=1,
+                max_distance=None, k_clusters=1):
         """Find the closest item(s) for each feature_list in.
 
         Args:
@@ -240,8 +236,16 @@ class ClusterIndex(object):
                 (corresponding to the elements in records_data) and columns
                 that describe a point in space for each row.
             k: Return the k closest results.
+            max_distance: Return items no more than max_distance away from the
+                query point. Defaults to any distance.
             k_clusters: number of branches (clusters) to search at each level.
                 This increases recall at the cost of some speed.
+
+                Note: max_distance constraints are also applied.
+                    This means there may be less than k_clusters searched at
+                    each level.
+                    This means each search will fully traverse at least one
+                    (but at most k_clusters) clusters at each level.
 
         Returns:
             For each element in features_list, return the k-nearest items
@@ -250,33 +254,28 @@ class ClusterIndex(object):
              [(score2_1, item2_1), ..., (score2_k, item2_k)], ...]
         """
         if self.is_terminal:
-            nearest = self.root.nearest_search(features)
-            return [r[:k] for r in nearest]
+            return self.root.nearest_search(features, k=k,
+                                            max_distance=max_distance)
         else:
             ret = []
-            nearest = self.root.nearest_search(features)
+            nearest = self.root.nearest_search(features, k=k_clusters)
 
-            for search_i, nearest_clusters in enumerate(nearest):
+            for i, nearest_clusters in enumerate(nearest):
                 curr_ret = []
+                for distance, cluster in nearest_clusters:
 
-                for cluster_i, distance_cluster in enumerate(nearest_clusters):
-                    distance, cluster = distance_cluster
-                    cluster_items = cluster.search(features[search_i], k=k,
-                                                   k_clusters=k_clusters)
+                    cluster_items = cluster.\
+                            search(features[i], k=k,
+                                   k_clusters=k_clusters,
+                                   max_distance=max_distance)
 
                     for elements in cluster_items:
                         if len(elements) > 0:
                             curr_ret.extend(elements)
-
-                    # if we have k elements and we have searched at least
-                    # k_clusters then we are done
-                    if len(curr_ret) >= k and cluster_i + 1 >= k_clusters:
-                        break
-
                 ret.append(_k_best(curr_ret, k))
             return ret
 
-    def search(self, features, k=1, k_clusters=1,
+    def search(self, features, k=1, max_distance=None, k_clusters=1,
             return_distance=True):
         """Find the closest item(s) for each feature_list in the index.
 
@@ -285,8 +284,17 @@ class ClusterIndex(object):
                 (corresponding to the elements in records_data) and columns
                 that describe a point in space for each row.
             k: Return the k closest results.
+            max_distance: Return items no more than max_distance away from the
+                query point. Defaults to any distance.
             k_clusters: number of branches (clusters) to search at each level.
                 This increases recall at the cost of some speed.
+
+                Note: max_distance constraints are also applied.
+                    This means there may be less than k_clusters searched at
+                    each level.
+
+                    This means each search will fully traverse at least one
+                    (but at most k_clusters) clusters at each level.
 
         Returns:
             For each element in features_list, return the k-nearest items
@@ -311,6 +319,7 @@ class ClusterIndex(object):
 
             results.extend(self._search(features=records_rng,
                                         k=k,
+                                        max_distance=max_distance,
                                         k_clusters=k_clusters))
 
         return [_filter_distance(res, return_distance) for res in results]
@@ -320,7 +329,7 @@ class ClusterIndex(object):
         print(tabs + str(self.root.matrix.shape[0]))
         if not self.is_terminal:
             for index in self.root.records_data:
-                index._print_structure(tabs + '  ')
+                index.print_structure(tabs + '  ')
 
     def _max_depth(self):
         """Yield the max depth of the tree index"""
@@ -439,7 +448,7 @@ class MultiClusterIndex(object):
         for ind in self.indexes:
             ind.insert(feature, record)
 
-    def search(self, features, k=1, k_clusters=1,
+    def search(self, features, k=1, max_distance=None, k_clusters=1,
                return_distance=True, num_indexes=None):
         """Find the closest item(s) for each feature_list in the index.
 
@@ -448,10 +457,18 @@ class MultiClusterIndex(object):
                 (corresponding to the elements in records_data) and columns
                 that describe a point in space for each row.
             k: Return the k closest results.
+            max_distance: Return items no more than max_distance away from the
+                query point. Defaults to any distance.
             k_clusters: number of branches (clusters) to search at each level
                 within each index. This increases recall at the cost of some
                 speed.
 
+                Note: max_distance constraints are also applied.
+                    This means there may be less than k_clusters searched at
+                    each level.
+
+                    This means each search will fully traverse at least one
+                    (but at most k_clusters) clusters at each level.
             num_indexes: number of indexes to search. This increases recall at
                 the cost of some speed. Can not be larger than the number of
                 num_indexes that was specified in the constructor. Defaults to
@@ -471,7 +488,8 @@ class MultiClusterIndex(object):
         if num_indexes is None:
             num_indexes = len(self.indexes)
         for ind in self.indexes[:num_indexes]:
-            results.append(ind.search(features, k, k_clusters, True))
+            results.append(ind.search(features, k, max_distance,
+                                      k_clusters, True))
         ret = []
         for r in _np.hstack(results):
             ret.append(
